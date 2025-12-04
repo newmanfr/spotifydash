@@ -26,4 +26,4 @@ SPOTIFY API
 
 I cannot see any of these. It is important you do not share these with anyone.
 
-If you have any questions feel free to ask in my server, https://dsc.gg/vrtl
+If you have any questions feel free to ask in my server, https://dsc.gg/newmanserver
