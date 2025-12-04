@@ -9,6 +9,8 @@ import pygame
 import librosa
 import numpy as np
 import spotipy
+import random
+import bisect
 from spotipy.oauth2 import SpotifyClientCredentials
 from pytubefix import Search
 
@@ -22,10 +24,83 @@ SPOTIFY_CLIENT_SECRET = None
 
 CREDENTIALS_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_credentials.json")
 FFMPEG_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_ffmpeg.json")
+STATS_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_stats.json")
 
 JUMP_BUFFER_TIME = 0.5          # how long jump input is buffered
 JUMP_LEAD_TIME = 0.25           # time between beat (jump) and spike collision
 FORCED_WAIT_BEFORE_FIRST_BEAT = 1.0  # always spawn 1s before first beat on all attempts
+
+STATS = None  # loaded at runtime
+
+
+# ============================================================
+# STATS HANDLING
+# ============================================================
+
+def load_stats():
+    if not os.path.exists(STATS_PATH):
+        return {
+            "tracks": {},               # track_id -> {name, plays, best_percent}
+            "total_songs_played": 0,
+            "total_jumps": 0
+        }
+    try:
+        with open(STATS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("tracks", {})
+        data.setdefault("total_songs_played", 0)
+        data.setdefault("total_jumps", 0)
+        return data
+    except Exception:
+        return {
+            "tracks": {},
+            "total_songs_played": 0,
+            "total_jumps": 0
+        }
+
+
+def save_stats():
+    global STATS
+    try:
+        with open(STATS_PATH, "w", encoding="utf-8") as f:
+            json.dump(STATS, f, indent=2)
+    except Exception:
+        pass
+
+
+def ensure_stats_loaded():
+    global STATS
+    if STATS is None:
+        STATS = load_stats()
+
+
+def track_display_name(track):
+    title = track.get("name", "Unknown Title")
+    artists = ", ".join(a.get("name", "Unknown Artist") for a in track.get("artists", [])) or "Unknown Artist"
+    return f"{title} – {artists}"
+
+
+def update_stats_for_song(track, percent, jumps_this_run):
+    global STATS
+    ensure_stats_loaded()
+    track_id = track.get("id") or track.get("uri") or track_display_name(track)
+    disp = track_display_name(track)
+
+    tdict = STATS["tracks"].setdefault(track_id, {
+        "name": disp,
+        "plays": 0,
+        "best_percent": 0
+    })
+
+    tdict["name"] = disp
+    tdict["plays"] = tdict.get("plays", 0) + 1
+    if percent > tdict.get("best_percent", 0):
+        tdict["best_percent"] = int(percent)
+
+    STATS["total_songs_played"] = STATS.get("total_songs_played", 0) + 1
+    STATS["total_jumps"] = STATS.get("total_jumps", 0) + int(jumps_this_run)
+
+    save_stats()
 
 
 # ============================================================
@@ -170,15 +245,174 @@ def get_spotify_client():
 
 
 # ============================================================
+# MAIN MENU (START / STATS)
+# ============================================================
+
+def main_menu():
+    """
+    Returns: "start", "stats", or "quit"
+    """
+    scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash")
+    W, H = scr.get_size()
+    clock = pygame.time.Clock()
+
+    title_font = pygame.font.SysFont("Arial", 64, bold=True)
+    btn_font = pygame.font.SysFont("Arial", 36)
+
+    start_btn = pygame.Rect(W // 2 - 180, H // 2 - 40, 360, 70)
+    stats_btn = pygame.Rect(W // 2 - 180, H // 2 + 50, 360, 70)
+
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+                return "quit"
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    try:
+                        pygame.mixer.music.stop()
+                    except Exception:
+                        pass
+                    return "quit"
+                if e.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_s):
+                    return "start"
+                if e.key == pygame.K_t:
+                    return "stats"
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                mx, my = e.pos
+                if start_btn.collidepoint(mx, my):
+                    return "start"
+                if stats_btn.collidepoint(mx, my):
+                    return "stats"
+
+        scr.fill((10, 10, 18))
+
+        title = title_font.render("Spotify Dash", True, (240, 240, 255))
+        scr.blit(title, (W // 2 - title.get_width() // 2, H // 2 - 160))
+
+        # Start button
+        pygame.draw.rect(scr, (40, 140, 240), start_btn, border_radius=12)
+        pygame.draw.rect(scr, (20, 90, 180), start_btn, 3, border_radius=12)
+        s_txt = btn_font.render("Start", True, (255, 255, 255))
+        scr.blit(s_txt, (start_btn.centerx - s_txt.get_width() // 2,
+                         start_btn.centery - s_txt.get_height() // 2))
+
+        # Stats button
+        pygame.draw.rect(scr, (60, 180, 120), stats_btn, border_radius=12)
+        pygame.draw.rect(scr, (30, 120, 80), stats_btn, 3, border_radius=12)
+        t_txt = btn_font.render("Stats", True, (255, 255, 255))
+        scr.blit(t_txt, (stats_btn.centerx - t_txt.get_width() // 2,
+                         stats_btn.centery - t_txt.get_height() // 2))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+
+# ============================================================
+# STATS SCREEN
+# ============================================================
+
+def show_stats_screen():
+    ensure_stats_loaded()
+    scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash – Stats")
+    W, H = scr.get_size()
+    clock = pygame.time.Clock()
+
+    title_font = pygame.font.SysFont("Arial", 56, bold=True)
+    header_font = pygame.font.SysFont("Arial", 32, bold=True)
+    text_font = pygame.font.SysFont("Arial", 24)
+
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+                return
+            if e.type == pygame.KEYDOWN:
+                if e.key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                    return
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                return
+
+        scr.fill((8, 8, 14))
+
+        title = title_font.render("Stats", True, (240, 240, 255))
+        scr.blit(title, (W // 2 - title.get_width() // 2, 40))
+
+        # Overall stats
+        ts = STATS.get("total_songs_played", 0)
+        tj = STATS.get("total_jumps", 0)
+
+        overall_y = 130
+        overall1 = text_font.render(f"Total songs played: {ts}", True, (220, 220, 240))
+        overall2 = text_font.render(f"Total jumps: {tj}", True, (220, 220, 240))
+        scr.blit(overall1, (60, overall_y))
+        scr.blit(overall2, (60, overall_y + 35))
+
+        tracks = list(STATS.get("tracks", {}).values())
+
+        # Most played songs
+        most_played = sorted(tracks, key=lambda t: t.get("plays", 0), reverse=True)[:7]
+        best_percent = sorted(tracks, key=lambda t: t.get("best_percent", 0), reverse=True)[:7]
+
+        # Left column: Most played
+        left_x = 60
+        left_y = 210
+        h1 = header_font.render("Most played songs", True, (230, 230, 255))
+        scr.blit(h1, (left_x, left_y))
+        y = left_y + 40
+        if most_played:
+            for t in most_played:
+                line = f"{t.get('name','Unknown')}  (plays: {t.get('plays',0)})"
+                surf = text_font.render(line, True, (210, 210, 230))
+                scr.blit(surf, (left_x, y))
+                y += 30
+        else:
+            surf = text_font.render("No data yet. Play some songs!", True, (210, 210, 230))
+            scr.blit(surf, (left_x, y))
+
+        # Right column: Best percentages
+        right_x = W // 2 + 40
+        right_y = 210
+        h2 = header_font.render("Best percentages", True, (230, 230, 255))
+        scr.blit(h2, (right_x, right_y))
+        y2 = right_y + 40
+        if best_percent:
+            for t in best_percent:
+                bp = int(t.get("best_percent", 0))
+                line = f"{t.get('name','Unknown')}  ({bp}%)"
+                surf = text_font.render(line, True, (210, 210, 230))
+                scr.blit(surf, (right_x, y2))
+                y2 += 30
+        else:
+            surf = text_font.render("No data yet. Play some songs!", True, (210, 210, 230))
+            scr.blit(surf, (right_x, y2))
+
+        hint = text_font.render("Press ESC / Enter / Click to go back", True, (180, 180, 200))
+        scr.blit(hint, (W // 2 - hint.get_width() // 2, H - 60))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+
+# ============================================================
 # UI SEARCH SCREEN
 # ============================================================
 
 def live_search_screen():
     """
-    Returns a Spotify track dict, or None if ESC is pressed (to quit).
+    Returns a Spotify track dict, or None if ESC is pressed (to go back to menu).
     """
     pygame.init()
     scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash – Song Picker")
     W, H = scr.get_size()
     clock = pygame.time.Clock()
 
@@ -196,6 +430,10 @@ def live_search_screen():
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
                 pygame.quit()
                 sys.exit()
 
@@ -226,14 +464,14 @@ def live_search_screen():
                     if ry <= my <= ry + 50:
                         selected = t
 
-        scr.fill((20, 20, 30))
+        scr.fill((12, 12, 18))
 
-        title = font_big.render("Search Song", True, (255, 255, 255))
+        title = font_big.render("Search Song", True, (240, 240, 255))
         scr.blit(title, (W // 2 - title.get_width() // 2, 70))
 
         bar = pygame.Rect(W // 2 - 400, 150, 800, 50)
-        pygame.draw.rect(scr, (50, 50, 70), bar)
-        txt = font_small.render(query, True, (255, 255, 255))
+        pygame.draw.rect(scr, (35, 35, 55), bar)
+        txt = font_small.render(query, True, (230, 230, 245))
         scr.blit(txt, (bar.x + 10, bar.y + 10))
 
         sy = 230
@@ -241,7 +479,7 @@ def live_search_screen():
             name = t["name"]
             artists = ", ".join(a["name"] for a in t["artists"])
             line = f"{i+1}. {name} – {artists}"
-            rtxt = font_result.render(line, True, (220, 220, 220))
+            rtxt = font_result.render(line, True, (210, 210, 225))
             scr.blit(rtxt, (W // 2 - 380, sy + i * 55))
 
         pygame.display.flip()
@@ -257,11 +495,12 @@ def live_search_screen():
 
 def show_loading_screen(message="Loading..."):
     scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash – Loading")
     W, H = scr.get_size()
     font = pygame.font.SysFont("Arial", 40)
 
-    scr.fill((10, 10, 20))
-    txt = font.render(message, True, (255, 255, 255))
+    scr.fill((6, 6, 10))
+    txt = font.render(message, True, (235, 235, 250))
     scr.blit(txt, (W // 2 - txt.get_width() // 2, H // 2 - txt.get_height() // 2))
     pygame.display.flip()
 
@@ -335,7 +574,7 @@ def ensure_wav(path):
 
 
 # ============================================================
-# BEAT ANALYSIS
+# BEAT + ENVELOPE ANALYSIS
 # ============================================================
 
 def analyze_beats(path):
@@ -348,8 +587,44 @@ def analyze_beats(path):
     beats = librosa.frames_to_time(frames, sr=sr)
     dur = librosa.get_duration(y=y, sr=sr)
 
+    # Audio envelope for visualiser (RMS)
+    hop_length = 1024
+    frame_length = 2048
+    rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+    env_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+
+    # Normalise to 0–1
+    rms = rms.astype(float)
+    if rms.max() > 0:
+        rms = (rms - rms.min()) / (rms.max() - rms.min() + 1e-9)
+    else:
+        rms[:] = 0.0
+
     print(f"Tempo {tempo:.1f} BPM | Beats: {len(beats)}")
-    return beats.tolist(), dur, wav
+    return beats.tolist(), dur, wav, env_times.tolist(), rms.tolist()
+
+
+def sample_envelope(env_times, env_vals, t):
+    """Linear interpolation of envelope at time t."""
+    if not env_times:
+        return 0.0
+    if t <= env_times[0]:
+        return env_vals[0]
+    if t >= env_times[-1]:
+        return env_vals[-1]
+
+    i = bisect.bisect_left(env_times, t)
+    if i <= 0:
+        return env_vals[0]
+    if i >= len(env_times):
+        return env_vals[-1]
+
+    t0, t1 = env_times[i - 1], env_times[i]
+    v0, v1 = env_vals[i - 1], env_vals[i]
+    if t1 <= t0:
+        return v1
+    alpha = (t - t0) / (t1 - t0)
+    return v0 + alpha * (v1 - v0)
 
 
 # ============================================================
@@ -358,6 +633,7 @@ def analyze_beats(path):
 
 def select_difficulty(all_beats):
     scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash – Difficulty")
     W, H = scr.get_size()
     clock = pygame.time.Clock()
     big = pygame.font.SysFont("Arial", 48)
@@ -368,6 +644,10 @@ def select_difficulty(all_beats):
     while choice_beats is None:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
                 pygame.quit(); sys.exit()
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
@@ -379,14 +659,14 @@ def select_difficulty(all_beats):
                 elif e.key == pygame.K_3:
                     choice_beats = all_beats
 
-        scr.fill((15, 15, 25))
+        scr.fill((8, 8, 14))
 
-        t = big.render("Select Difficulty", True, (255, 255, 255))
+        t = big.render("Select Difficulty", True, (240, 240, 255))
         scr.blit(t, (W // 2 - t.get_width() // 2, 100))
 
-        o1 = small.render("1 — Easy (1/3 beats)", True, (200, 255, 200))
-        o2 = small.render("2 — Normal (1/2 beats)", True, (255, 255, 200))
-        o3 = small.render("3 — Hard (all beats)", True, (255, 200, 200))
+        o1 = small.render("1 — Easy (1/3 beats)", True, (180, 230, 180))
+        o2 = small.render("2 — Normal (1/2 beats)", True, (230, 230, 180))
+        o3 = small.render("3 — Hard (all beats)", True, (230, 180, 180))
 
         scr.blit(o1, (W // 2 - o1.get_width() // 2, 220))
         scr.blit(o2, (W // 2 - o2.get_width() // 2, 270))
@@ -449,13 +729,13 @@ def draw_spike(screen, x, ground_y, height_blocks):
     if height_blocks <= 0:
         base_y = ground_y
         pts = [(x, base_y), (x + 45, base_y), (x + 23, base_y - 50)]
-        pygame.draw.polygon(screen, (255, 70, 70), pts)
+        pygame.draw.polygon(screen, (230, 60, 60), pts)
         return pygame.Rect(x, base_y - 50, 45, 50)
     else:
         bottom_y = ground_y - height_blocks * 60
         top_y = bottom_y - 50
         pts = [(x, top_y), (x + 45, top_y), (x + 23, top_y + 50)]
-        pygame.draw.polygon(screen, (255, 70, 70), pts)
+        pygame.draw.polygon(screen, (230, 60, 60), pts)
         return pygame.Rect(x, top_y, 45, 50)
 
 
@@ -467,19 +747,109 @@ def get_platform_rect(x, ground_y):
 
 
 def draw_platform(screen, rect):
-    pygame.draw.rect(screen, (80, 200, 120), rect)
-    pygame.draw.rect(screen, (40, 120, 70), rect, 2)
+    pygame.draw.rect(screen, (60, 150, 100), rect)
+    pygame.draw.rect(screen, (30, 90, 60), rect, 2)
+
+
+# ============================================================
+# BACKGROUND (DARK COLORED SQUARE GRID)
+# ============================================================
+
+def draw_background(scr, W, H, now, speed, base_color, dark_color):
+    """
+    Darker colored square grid background, scrolling horizontally with spikes.
+    """
+    tile_size = 80
+    gap = 6
+
+    scr.fill(dark_color)
+    offset_x = int((now * speed * 0.4) % tile_size)
+
+    for x in range(-tile_size, W + tile_size, tile_size):
+        for y in range(0, H + tile_size, tile_size):
+            rect = pygame.Rect(
+                x - offset_x + gap,
+                y + gap,
+                tile_size - 2 * gap,
+                tile_size - 2 * gap,
+            )
+            pygame.draw.rect(scr, base_color, rect)
+
+
+# ============================================================
+# PAUSE MENU
+# ============================================================
+
+def pause_menu(scr, W, H):
+    """
+    Simple pause menu opened with ESC during gameplay.
+    Returns "resume" or "exit".
+    """
+    clock = pygame.time.Clock()
+    title_font = pygame.font.SysFont("Arial", 48, bold=True)
+    btn_font = pygame.font.SysFont("Arial", 32)
+
+    overlay = pygame.Surface((W, H), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 150))
+
+    resume_btn = pygame.Rect(W // 2 - 150, H // 2 - 40, 300, 60)
+    exit_btn = pygame.Rect(W // 2 - 150, H // 2 + 40, 300, 60)
+
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                return "exit"
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    return "resume"
+                if e.key in (pygame.K_r, pygame.K_RETURN, pygame.K_SPACE):
+                    return "resume"
+                if e.key == pygame.K_x:
+                    return "exit"
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                mx, my = e.pos
+                if resume_btn.collidepoint(mx, my):
+                    return "resume"
+                if exit_btn.collidepoint(mx, my):
+                    return "exit"
+
+        scr.blit(overlay, (0, 0))
+
+        title = title_font.render("Paused", True, (255, 255, 255))
+        scr.blit(title, (W // 2 - title.get_width() // 2, H // 2 - 120))
+
+        pygame.draw.rect(scr, (60, 160, 240), resume_btn, border_radius=10)
+        pygame.draw.rect(scr, (30, 100, 180), resume_btn, 3, border_radius=10)
+        r_txt = btn_font.render("Resume", True, (255, 255, 255))
+        scr.blit(r_txt, (resume_btn.centerx - r_txt.get_width() // 2,
+                         resume_btn.centery - r_txt.get_height() // 2))
+
+        pygame.draw.rect(scr, (240, 90, 90), exit_btn, border_radius=10)
+        pygame.draw.rect(scr, (180, 40, 40), exit_btn, 3, border_radius=10)
+        e_txt = btn_font.render("Exit to Song Picker", True, (255, 255, 255))
+        scr.blit(e_txt, (exit_btn.centerx - e_txt.get_width() // 2,
+                         exit_btn.centery - e_txt.get_height() // 2))
+
+        pygame.display.flip()
+        clock.tick(60)
 
 
 # ============================================================
 # GAME LOOP
 # ============================================================
 
-def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_surf):
+def run_game(path, jump_beats, dur, time_offset,
+             song_title, song_artist, cover_surf,
+             env_times, env_vals):
+    """
+    Returns (result, last_percent, jumps_this_run)
+    result in {"song_end", "esc", "change_diff", "restart", "quit"}
+    """
     pygame.init()
     pygame.mixer.init()
 
     scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("Spotify Dash – Playing")
     W, H = scr.get_size()
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Arial", 32)
@@ -495,56 +865,95 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
     speed = 330
     player_h = 50
 
-    base_bg = (25, 25, 32)
-    bg = base_bg
+    # Darker base colors for grid
+    base_color = (
+        random.randint(40, 140),
+        random.randint(40, 140),
+        random.randint(40, 140),
+    )
+    dark_color = tuple(int(c * 0.35) for c in base_color)
+
+    cover_thumb = None
+    if cover_surf is not None:
+        cover_thumb = pygame.transform.smoothscale(cover_surf, (128, 128))
 
     spikes, platforms = build_level(jump_beats)
 
-    if cover_surf is not None:
-        cover_surf = pygame.transform.smoothscale(cover_surf, (128, 128))
-    title_surf = meta_title_font.render(song_title, True, (255, 255, 255))
-    artist_surf = meta_artist_font.render(song_artist, True, (200, 200, 200))
+    title_surf = meta_title_font.render(song_title, True, (240, 240, 255))
+    artist_surf = meta_artist_font.render(song_artist, True, (210, 210, 230))
 
     pygame.mixer.music.load(path)
     pygame.mixer.music.play()
     start_ms = pygame.time.get_ticks()
 
+    # Visualiser bars
+    n_bars = 40
+    bar_factors_start = [random.uniform(0.4, 1.3) for _ in range(n_bars)]
+    bar_factors_target = bar_factors_start[:]
+    randomize_interval = 0.4    # randomise every 0.4s
+    morph_duration = 0.2        # smooth morph over 0.2s
+    last_randomize_time = -999.0
+    morph_start_time = 0.0
+
     game_over = False
     jump_req = None
+    jumps_this_run = 0
+    last_percent = 0
 
     while True:
         dt = clock.tick(120) / 1000.0
-        now = (pygame.time.get_ticks() - start_ms) / 1000.0 + time_offset
+        elapsed_audio = (pygame.time.get_ticks() - start_ms) / 1000.0  # actual audio time
+        now = elapsed_audio + time_offset  # level timeline
         py_prev = py
+
+        # If music finished, go back to song picker
+        if not pygame.mixer.music.get_busy() and not game_over:
+            return "song_end", 100, jumps_this_run
 
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
+                pygame.mixer.music.stop()
                 pygame.quit()
-                return "quit"
+                return "quit", last_percent, jumps_this_run
 
             if e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_ESCAPE:
-                    return "esc"
+                if e.key == pygame.K_ESCAPE and not game_over:
+                    # PAUSE: pause audio too, and allow many times
+                    pygame.mixer.music.pause()
+                    choice = pause_menu(scr, W, H)
+                    if choice == "resume":
+                        pygame.mixer.music.unpause()
+                        # re-sync start time so elapsed_audio doesn't jump
+                        start_ms = pygame.time.get_ticks() - int(elapsed_audio * 1000)
+                        continue
+                    elif choice == "exit":
+                        pygame.mixer.music.stop()
+                        return "esc", last_percent, jumps_this_run
 
                 if e.key in (pygame.K_SPACE, pygame.K_UP):
                     jump_req = now
 
                 if game_over:
                     if e.key == pygame.K_r:
-                        return "restart"
+                        pygame.mixer.music.stop()
+                        return "restart", last_percent, jumps_this_run
                     if e.key == pygame.K_t:
-                        return "change_diff"
+                        pygame.mixer.music.stop()
+                        return "change_diff", last_percent, jumps_this_run
+                    if e.key == pygame.K_ESCAPE:
+                        pygame.mixer.music.stop()
+                        return "esc", last_percent, jumps_this_run
 
             if e.type == pygame.MOUSEBUTTONDOWN and not game_over:
                 if e.button == 1:
                     jump_req = now
 
-        # Physics integration
+        # Physics
         if not game_over:
             vy += gravity
             py += vy
 
-        # --- Collision & standing detection ---
+        # Platforms
         platform_draw_data = []
         new_platforms = []
         for pf in platforms:
@@ -562,7 +971,7 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
         player_bottom_now = py + player_h
         player_rect_for_check = pygame.Rect(px, int(py), 50, player_h)
 
-        # Land on platforms from above
+        # Land on platforms
         if vy >= 0:
             for pf, rect in platform_draw_data:
                 if player_bottom_prev <= rect.top <= player_bottom_now:
@@ -573,35 +982,80 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                         standing = True
                         break
 
-        # Base ground
+        # Ground
         if py >= effective_ground - player_h:
             py = effective_ground - player_h
             vy = 0
             standing = True
 
-        # --- Apply buffered jump AFTER we know if we're standing (ground or platform) ---
+        # Buffered jump
         if jump_req is not None and not game_over:
             if (now - jump_req) <= JUMP_BUFFER_TIME:
                 if standing:
                     vy = jump
                     py = effective_ground - player_h
+                    jumps_this_run += 1
                     jump_req = None
             else:
                 jump_req = None
 
-        # Draw
-        scr.fill(bg)
-        pygame.draw.line(scr, (200, 200, 200), (0, ground_y), (W, ground_y), 4)
+        # Background
+        draw_background(scr, W, H, now, speed, base_color, dark_color)
 
+        # ===== Audio visualiser (bottom, never above ground line) =====
+        amp = sample_envelope(env_times, env_vals, elapsed_audio)  # 0..1
+
+        # Randomise bar "max heights" every 0.4 seconds, then morph for 0.2s
+        if elapsed_audio - last_randomize_time >= randomize_interval:
+            bar_factors_start = bar_factors_target[:]
+            bar_factors_target = [random.uniform(0.4, 1.3) for _ in range(n_bars)]
+            morph_start_time = elapsed_audio
+            last_randomize_time = elapsed_audio
+
+        if morph_duration > 0:
+            progress = (elapsed_audio - morph_start_time) / morph_duration
+            if progress < 0.0:
+                progress = 0.0
+            if progress > 1.0:
+                progress = 1.0
+        else:
+            progress = 1.0
+
+        bar_width = max(4, W // n_bars)
+        max_height = H - ground_y - 8  # space between ground and bottom
+
+        for i in range(n_bars):
+            factor = (bar_factors_start[i] * (1.0 - progress) +
+                      bar_factors_target[i] * progress)
+
+            bar_max_height = factor * max_height
+            bar_height = int(amp * bar_max_height)
+
+            top = H - bar_height
+            if top < ground_y + 2:
+                top = ground_y + 2
+                bar_height = H - top
+            x = i * bar_width
+            if bar_height > 0:
+                c0 = min(base_color[0] + 40, 255)
+                c1 = min(base_color[1] + 40, 255)
+                c2 = min(base_color[2] + 40, 255)
+                rect = pygame.Rect(x, top, bar_width - 2, bar_height)
+                pygame.draw.rect(scr, (c0, c1, c2), rect)
+
+        # Ground line
+        pygame.draw.line(scr, (180, 180, 190), (0, ground_y), (W, ground_y), 4)
+
+        # Player
         player = pygame.Rect(px, int(py), 50, player_h)
-        pygame.draw.rect(scr, (0, 180, 255), player)
+        pygame.draw.rect(scr, (0, 150, 210), player)
 
-        # Platforms (and side collisions = death)
+        # Platforms
         for pf, rect in platform_draw_data:
             draw_platform(scr, rect)
             if player.colliderect(rect):
                 if player.bottom <= rect.top + 2:
-                    pass  # standing handled already
+                    pass
                 else:
                     game_over = True
 
@@ -616,13 +1070,13 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                     game_over = True
         spikes = new_spikes
 
-        # Song metadata overlay
+        # ===== HUD (metadata + completion %) =====
         meta_rect = pygame.Rect(10, 10, 360, 140)
-        pygame.draw.rect(scr, (15, 15, 25), meta_rect)
-        pygame.draw.rect(scr, (60, 60, 80), meta_rect, 2)
+        pygame.draw.rect(scr, (10, 10, 18), meta_rect)
+        pygame.draw.rect(scr, (60, 60, 90), meta_rect, 2)
 
-        if cover_surf is not None:
-            scr.blit(cover_surf, (meta_rect.x + 8, meta_rect.y + 6))
+        if cover_thumb is not None:
+            scr.blit(cover_thumb, (meta_rect.x + 8, meta_rect.y + 6))
             text_x = meta_rect.x + 8 + 128 + 12
         else:
             text_x = meta_rect.x + 12
@@ -630,9 +1084,24 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
         scr.blit(title_surf, (text_x, meta_rect.y + 20))
         scr.blit(artist_surf, (text_x, meta_rect.y + 60))
 
+        # Song completion percentage (no decimals), TOP CENTER of screen
+        if dur > 0:
+            frac = elapsed_audio / dur
+            if frac < 0:
+                frac = 0
+            if frac > 1:
+                frac = 1
+            percent = int(frac * 100)
+        else:
+            percent = 0
+        last_percent = percent
+
+        percent_surf = font.render(f"{percent}%", True, (200, 255, 200))
+        scr.blit(percent_surf, (W // 2 - percent_surf.get_width() // 2, 10))
+
         if game_over:
-            t1 = font.render("GAME OVER", True, (255, 80, 80))
-            t2 = font.render("R = Restart, T = Change Difficulty, ESC = Song Picker", True, (255, 255, 255))
+            t1 = font.render("GAME OVER", True, (255, 90, 90))
+            t2 = font.render("R = Restart, T = Change Difficulty, ESC = Song Picker", True, (235, 235, 245))
             scr.blit(t1, (W // 2 - t1.get_width() // 2, H // 2 - 60))
             scr.blit(t2, (W // 2 - t2.get_width() // 2, H // 2))
 
@@ -648,74 +1117,110 @@ def main():
 
     ensure_spotify_credentials()
     ensure_ffmpeg_path()
+    ensure_stats_loaded()
 
     while True:
-        track = live_search_screen()
-        if track is None:
+        menu_choice = main_menu()
+        if menu_choice == "quit":
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
             pygame.quit()
             sys.exit()
-
-        song_title, song_artist, cover_surf = get_track_metadata(track)
-
-        show_loading_screen("Loading song...")
-
-        name = track["name"] + " " + " ".join(a["name"] for a in track["artists"])
-        print("\nUsing YouTube audio for:", name)
-        audio = download_youtube_audio(name)
-        if not audio:
+        if menu_choice == "stats":
+            show_stats_screen()
+            continue
+        if menu_choice != "start":
             continue
 
-        show_loading_screen("Analyzing beat...")
-
-        all_beats, dur, wav = analyze_beats(audio)
-        if not all_beats:
-            continue
-
+        # START -> song picker flow
         while True:
-            jump_beats = select_difficulty(all_beats)
-            if jump_beats is None:
+            track = live_search_screen()
+            if track is None:
+                # back to main menu
                 break
 
-            first_beat = jump_beats[0]
+            song_title, song_artist, cover_surf = get_track_metadata(track)
 
-            # Always spawn FORCED_WAIT_BEFORE_FIRST_BEAT seconds before first beat.
-            time_offset = first_beat - FORCED_WAIT_BEFORE_FIRST_BEAT
-            if time_offset < 0.0:
-                time_offset = 0.0
+            show_loading_screen("Loading song...")
 
-            while True:
-                result = run_game(
-                    wav,
-                    jump_beats,
-                    dur,
-                    time_offset,
-                    song_title,
-                    song_artist,
-                    cover_surf
-                )
-
-                if result == "quit":
-                    pygame.quit()
-                    sys.exit()
-
-                if result == "esc":
-                    break
-
-                if result == "change_diff":
-                    break
-
-                if result == "restart":
-                    # Keep same offset on restart
-                    continue
-
-                break
-
-            if result == "esc":
-                break
-
-            if result == "change_diff":
+            name = track_display_name(track)
+            print("\nUsing YouTube audio for:", name)
+            audio = download_youtube_audio(name)
+            if not audio:
                 continue
 
+            show_loading_screen("Analyzing beat...")
+
+            all_beats, dur, wav, env_times, env_vals = analyze_beats(audio)
+            if not all_beats:
+                continue
+
+            # difficulty loop
+            while True:
+                jump_beats = select_difficulty(all_beats)
+                if jump_beats is None:
+                    # back to song picker
+                    break
+
+                first_beat = jump_beats[0]
+                time_offset = first_beat - FORCED_WAIT_BEFORE_FIRST_BEAT
+                if time_offset < 0.0:
+                    time_offset = 0.0
+
+                # game loop (with restart support)
+                while True:
+                    result, percent, jumps = run_game(
+                        wav,
+                        jump_beats,
+                        dur,
+                        time_offset,
+                        song_title,
+                        song_artist,
+                        cover_surf,
+                        env_times,
+                        env_vals
+                    )
+
+                    # update stats for this run
+                    update_stats_for_song(track, percent, jumps)
+
+                    if result == "quit":
+                        try:
+                            pygame.mixer.music.stop()
+                        except Exception:
+                            pass
+                        pygame.quit()
+                        sys.exit()
+
+                    if result == "song_end":
+                        # back to song picker
+                        result = "esc"
+
+                    if result == "esc":
+                        # back to song picker
+                        break
+
+                    if result == "change_diff":
+                        # break inner loop, go to difficulty screen
+                        break
+
+                    if result == "restart":
+                        # just re-run game with same difficulty
+                        continue
+
+                    break  # safety
+
+                if result == "esc":
+                    break  # back to song picker
+
+                if result == "change_diff":
+                    continue  # show difficulty again
+
+                break  # safety
+
+            # after done with this track, back to main menu
             break
 
 
