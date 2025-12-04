@@ -16,18 +16,16 @@ from pytubefix import Search
 # CONFIG
 # ============================================================
 
-# Will be filled at runtime from saved config / user input
 FFMPEG_EXE = None
 SPOTIFY_CLIENT_ID = None
 SPOTIFY_CLIENT_SECRET = None
 
-# Where to store local configs in the user's home directory
 CREDENTIALS_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_credentials.json")
 FFMPEG_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_ffmpeg.json")
 
 JUMP_BUFFER_TIME = 0.5          # how long jump input is buffered
 JUMP_LEAD_TIME = 0.25           # time between beat (jump) and spike collision
-PRE_BEAT_START_GAP = 2.0        # preferred: start 2s before first beat
+FORCED_WAIT_BEFORE_FIRST_BEAT = 1.0  # always spawn 1s before first beat on all attempts
 
 
 # ============================================================
@@ -541,18 +539,12 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                 if e.button == 1:
                     jump_req = now
 
-        if jump_req is not None:
-            if now - jump_req <= JUMP_BUFFER_TIME:
-                if py >= ground_y - player_h - 1:
-                    vy = jump
-                    jump_req = None
-            else:
-                jump_req = None
-
+        # Physics integration
         if not game_over:
             vy += gravity
             py += vy
 
+        # --- Collision & standing detection ---
         platform_draw_data = []
         new_platforms = []
         for pf in platforms:
@@ -564,10 +556,13 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
         platforms = new_platforms
 
         effective_ground = ground_y
+        standing = False
+
         player_bottom_prev = py_prev + player_h
         player_bottom_now = py + player_h
         player_rect_for_check = pygame.Rect(px, int(py), 50, player_h)
 
+        # Land on platforms from above
         if vy >= 0:
             for pf, rect in platform_draw_data:
                 if player_bottom_prev <= rect.top <= player_bottom_now:
@@ -575,26 +570,42 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                         py = rect.top - player_h
                         vy = 0
                         effective_ground = rect.top
+                        standing = True
                         break
 
+        # Base ground
         if py >= effective_ground - player_h:
             py = effective_ground - player_h
             vy = 0
+            standing = True
 
+        # --- Apply buffered jump AFTER we know if we're standing (ground or platform) ---
+        if jump_req is not None and not game_over:
+            if (now - jump_req) <= JUMP_BUFFER_TIME:
+                if standing:
+                    vy = jump
+                    py = effective_ground - player_h
+                    jump_req = None
+            else:
+                jump_req = None
+
+        # Draw
         scr.fill(bg)
         pygame.draw.line(scr, (200, 200, 200), (0, ground_y), (W, ground_y), 4)
 
         player = pygame.Rect(px, int(py), 50, player_h)
         pygame.draw.rect(scr, (0, 180, 255), player)
 
+        # Platforms (and side collisions = death)
         for pf, rect in platform_draw_data:
             draw_platform(scr, rect)
             if player.colliderect(rect):
                 if player.bottom <= rect.top + 2:
-                    pass
+                    pass  # standing handled already
                 else:
                     game_over = True
 
+        # Spikes
         new_spikes = []
         for sp in spikes:
             x = sp.x(now, speed)
@@ -605,6 +616,7 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                     game_over = True
         spikes = new_spikes
 
+        # Song metadata overlay
         meta_rect = pygame.Rect(10, 10, 360, 140)
         pygame.draw.rect(scr, (15, 15, 25), meta_rect)
         pygame.draw.rect(scr, (60, 60, 80), meta_rect, 2)
@@ -665,13 +677,22 @@ def main():
                 break
 
             first_beat = jump_beats[0]
-            if first_beat >= PRE_BEAT_START_GAP:
-                time_offset = first_beat - PRE_BEAT_START_GAP
-            else:
-                time_offset = max(0.0, first_beat - 1.0)
+
+            # Always spawn FORCED_WAIT_BEFORE_FIRST_BEAT seconds before first beat.
+            time_offset = first_beat - FORCED_WAIT_BEFORE_FIRST_BEAT
+            if time_offset < 0.0:
+                time_offset = 0.0
 
             while True:
-                result = run_game(wav, jump_beats, dur, time_offset, song_title, song_artist, cover_surf)
+                result = run_game(
+                    wav,
+                    jump_beats,
+                    dur,
+                    time_offset,
+                    song_title,
+                    song_artist,
+                    cover_surf
+                )
 
                 if result == "quit":
                     pygame.quit()
@@ -684,11 +705,12 @@ def main():
                     break
 
                 if result == "restart":
+                    # Keep same offset on restart
                     continue
 
                 break
 
-            if result in ("esc",):
+            if result == "esc":
                 break
 
             if result == "change_diff":
