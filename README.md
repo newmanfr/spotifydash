@@ -6,8 +6,7 @@ For this to work please follow two things below!
 FFMPEG
 
 This game requires FFmpeg to convert audio.  
-Download FFmpeg here: https://ffmpeg.org/download.html
-
+Download FFmpeg here: https://drive.google.com/drive/folders/1GtTeESw1SImTTWYZflgqXebjJUb0angm?usp=drive_link
 After installing, set the FFMPEG_EXE path when asked loading the script!
 
 FFMPEG_EXE = r"C:\ffmpeg\bin\ffmpeg.exe"
