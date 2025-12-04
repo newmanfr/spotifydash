@@ -16,14 +16,14 @@ from pytubefix import Search
 # CONFIG
 # ============================================================
 
-FFMPEG_EXE = r"ENTER PATH HERE"
-
-# These will be filled at runtime from saved credentials / user input
+# Will be filled at runtime from saved config / user input
+FFMPEG_EXE = None
 SPOTIFY_CLIENT_ID = None
 SPOTIFY_CLIENT_SECRET = None
 
-# Where to store Spotify credentials (local, not committed)
+# Where to store local configs in the user's home directory
 CREDENTIALS_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_credentials.json")
+FFMPEG_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".spotify_dash_ffmpeg.json")
 
 JUMP_BUFFER_TIME = 0.5          # how long jump input is buffered
 JUMP_LEAD_TIME = 0.25           # time between beat (jump) and spike collision
@@ -35,10 +35,6 @@ PRE_BEAT_START_GAP = 2.0        # preferred: start 2s before first beat
 # ============================================================
 
 def load_saved_credentials():
-    """
-    Try to load Spotify credentials from a JSON file in the user's home dir.
-    Returns (client_id, client_secret) or (None, None) if not available/invalid.
-    """
     try:
         if not os.path.exists(CREDENTIALS_PATH):
             return None, None
@@ -54,10 +50,6 @@ def load_saved_credentials():
 
 
 def prompt_and_save_credentials():
-    """
-    Ask the user for Spotify Client ID + Secret in the terminal,
-    then save them to CREDENTIALS_PATH for future runs.
-    """
     print("\n=== Spotify API Setup ===")
     print("Enter your Spotify API credentials.")
     print("They will be saved locally in:")
@@ -73,11 +65,10 @@ def prompt_and_save_credentials():
     }
 
     try:
-        # Ensure directory exists (usually home already exists)
         os.makedirs(os.path.dirname(CREDENTIALS_PATH), exist_ok=True)
         with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f)
-        print("\nSaved credentials. You won't be asked again on this machine unless you delete that file.\n")
+        print("\nSaved Spotify credentials.\n")
     except Exception as e:
         print(f"[WARN] Could not save credentials: {e}")
 
@@ -85,10 +76,6 @@ def prompt_and_save_credentials():
 
 
 def ensure_spotify_credentials():
-    """
-    Ensure global SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are set,
-    loading from file or prompting the user if needed.
-    """
     global SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
 
     cid, csec = load_saved_credentials()
@@ -97,6 +84,78 @@ def ensure_spotify_credentials():
 
     SPOTIFY_CLIENT_ID = cid
     SPOTIFY_CLIENT_SECRET = csec
+
+
+# ============================================================
+# FFMPEG PATH HANDLING
+# ============================================================
+
+def load_saved_ffmpeg_path():
+    try:
+        if not os.path.exists(FFMPEG_CONFIG_PATH):
+            return None
+        with open(FFMPEG_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        path = data.get("ffmpeg_path")
+        if path:
+            return path
+    except Exception:
+        pass
+    return None
+
+
+def ffmpeg_looks_valid(path):
+    if not path:
+        return False
+    if not os.path.isfile(path):
+        return False
+    try:
+        subprocess.run(
+            [path, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False
+        )
+        return True
+    except Exception:
+        return False
+
+
+def prompt_and_save_ffmpeg_path():
+    print("\n=== FFmpeg Setup ===")
+    print("FFmpeg is required to convert audio to WAV.")
+    print("Enter the full path to your ffmpeg.exe (for example: C:\\ffmpeg\\bin\\ffmpeg.exe).")
+    print("This will be saved locally in:")
+    print(f"  {FFMPEG_CONFIG_PATH}")
+    print("and reused next time.\n")
+
+    while True:
+        path = input("Full path to ffmpeg.exe: ").strip().strip('"')
+        if ffmpeg_looks_valid(path):
+            break
+        print("That path doesn't look valid. Please try again.\n")
+
+    data = {"ffmpeg_path": path}
+    try:
+        os.makedirs(os.path.dirname(FFMPEG_CONFIG_PATH), exist_ok=True)
+        with open(FFMPEG_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        print("\nSaved FFmpeg path.\n")
+    except Exception as e:
+        print(f"[WARN] Could not save FFmpeg path: {e}")
+
+    return path
+
+
+def ensure_ffmpeg_path():
+    global FFMPEG_EXE
+
+    saved = load_saved_ffmpeg_path()
+    if ffmpeg_looks_valid(saved):
+        FFMPEG_EXE = saved
+        return
+
+    FFMPEG_EXE = prompt_and_save_ffmpeg_path()
 
 
 # ============================================================
@@ -144,7 +203,6 @@ def live_search_screen():
 
             if ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
-                    # ESC at picker = exit whole game
                     return None
 
                 if ev.key == pygame.K_BACKSPACE:
@@ -184,7 +242,6 @@ def live_search_screen():
         for i, t in enumerate(results):
             name = t["name"]
             artists = ", ".join(a["name"] for a in t["artists"])
-            # No preview info shown
             line = f"{i+1}. {name} – {artists}"
             rtxt = font_result.render(line, True, (220, 220, 220))
             scr.blit(rtxt, (W // 2 - 380, sy + i * 55))
@@ -223,7 +280,7 @@ def get_track_metadata(track):
     try:
         images = track.get("album", {}).get("images", [])
         if images:
-            url = images[0]["url"]  # largest image
+            url = images[0]["url"]
             resp = requests.get(url, timeout=5)
             resp.raise_for_status()
             img_bytes = io.BytesIO(resp.content)
@@ -235,7 +292,7 @@ def get_track_metadata(track):
 
 
 # ============================================================
-# AUDIO DOWNLOAD (we always use YouTube for audio)
+# AUDIO DOWNLOAD (always YouTube)
 # ============================================================
 
 def download_youtube_audio(query):
@@ -302,10 +359,6 @@ def analyze_beats(path):
 # ============================================================
 
 def select_difficulty(all_beats):
-    """
-    Returns filtered beats list (the beat times you jump on).
-    If ESC pressed, returns None to go back to song picker.
-    """
     scr = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     W, H = scr.get_size()
     clock = pygame.time.Clock()
@@ -353,9 +406,6 @@ def select_difficulty(all_beats):
 
 class Spike:
     """
-    Spike is defined by the time at which it collides with the player
-    if the player does nothing.
-
     height_blocks:
       0 -> ground spike (points UP from ground)
       1 -> overhead spike (points DOWN above player path)
@@ -370,10 +420,8 @@ class Spike:
 
 class Platform:
     """
-    Platform the player can land on.
-
-    Always: 1 block tall, touching the ground,
-    so player must jump ONTO it or collide with the front.
+    Platform: 1 block tall touching the ground.
+    Player must jump onto it or collide with the front.
     """
     def __init__(self, collision_time):
         self.collision_time = collision_time
@@ -383,14 +431,6 @@ class Platform:
 
 
 def build_level(jump_beats):
-    """
-    jump_beats: times when the PLAYER should press jump (on beat).
-
-    Pattern:
-      - Some beats: ground spikes
-      - Some beats: overhead spikes (player must go under)
-      - Some beats: ground platforms (1 block tall touching ground, must jump onto)
-    """
     spikes = []
     platforms = []
 
@@ -398,32 +438,22 @@ def build_level(jump_beats):
         collision_t = b + JUMP_LEAD_TIME
 
         if i % 6 in (2, 5):
-            # ground platform 1-block tall
             platforms.append(Platform(collision_t))
         elif i % 8 == 4:
-            # overhead spike above player: drawn DOWNWARDS
-            spikes.append(Spike(collision_t, height_blocks=1))
+            spikes.append(Spike(collision_t, height_blocks=1))  # overhead
         else:
-            # normal ground spike
-            spikes.append(Spike(collision_t, height_blocks=0))
+            spikes.append(Spike(collision_t, height_blocks=0))  # ground
 
     return spikes, platforms
 
 
 def draw_spike(screen, x, ground_y, height_blocks):
-    """
-    Ground spikes (height_blocks==0): point UP from the ground.
-    Overhead spikes (height_blocks>0): point DOWN from above the player.
-    """
     if height_blocks <= 0:
-        # UPWARD spike from ground
         base_y = ground_y
         pts = [(x, base_y), (x + 45, base_y), (x + 23, base_y - 50)]
         pygame.draw.polygon(screen, (255, 70, 70), pts)
         return pygame.Rect(x, base_y - 50, 45, 50)
     else:
-        # DOWNWARD spike above player
-        # bottom of spike sits height_blocks*60 above the ground
         bottom_y = ground_y - height_blocks * 60
         top_y = bottom_y - 50
         pts = [(x, top_y), (x + 45, top_y), (x + 23, top_y + 50)]
@@ -432,10 +462,6 @@ def draw_spike(screen, x, ground_y, height_blocks):
 
 
 def get_platform_rect(x, ground_y):
-    """
-    Platform: 1 block tall touching the ground.
-    So it goes from ground_y - 60 up to ground_y.
-    """
     height = 60
     width = 120
     top = ground_y - height
@@ -452,13 +478,6 @@ def draw_platform(screen, rect):
 # ============================================================
 
 def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_surf):
-    """
-    Returns:
-      "esc"          → ESC pressed (go back to song picker)
-      "change_diff"  → T pressed after death (change difficulty)
-      "restart"      → R pressed after death (restart same diff)
-      "quit"         → window closed (exit)
-    """
     pygame.init()
     pygame.mixer.init()
 
@@ -483,7 +502,6 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
 
     spikes, platforms = build_level(jump_beats)
 
-    # Prepare metadata visuals
     if cover_surf is not None:
         cover_surf = pygame.transform.smoothscale(cover_surf, (128, 128))
     title_surf = meta_title_font.render(song_title, True, (255, 255, 255))
@@ -535,7 +553,6 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
             vy += gravity
             py += vy
 
-        # Platform positions for this frame
         platform_draw_data = []
         new_platforms = []
         for pf in platforms:
@@ -546,7 +563,6 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                 new_platforms.append(pf)
         platforms = new_platforms
 
-        # Landing on platforms
         effective_ground = ground_y
         player_bottom_prev = py_prev + player_h
         player_bottom_now = py + player_h
@@ -561,7 +577,6 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                         effective_ground = rect.top
                         break
 
-        # Base ground
         if py >= effective_ground - player_h:
             py = effective_ground - player_h
             vy = 0
@@ -572,17 +587,14 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
         player = pygame.Rect(px, int(py), 50, player_h)
         pygame.draw.rect(scr, (0, 180, 255), player)
 
-        # Draw platforms and check side collisions (death if hit from side/bottom)
         for pf, rect in platform_draw_data:
             draw_platform(scr, rect)
             if player.colliderect(rect):
-                # standing safely on top if feet are near top
                 if player.bottom <= rect.top + 2:
                     pass
                 else:
                     game_over = True
 
-        # Spikes (ground up, overhead down)
         new_spikes = []
         for sp in spikes:
             x = sp.x(now, speed)
@@ -593,7 +605,6 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
                     game_over = True
         spikes = new_spikes
 
-        # Song metadata overlay (top-left)
         meta_rect = pygame.Rect(10, 10, 360, 140)
         pygame.draw.rect(scr, (15, 15, 25), meta_rect)
         pygame.draw.rect(scr, (60, 60, 80), meta_rect, 2)
@@ -623,8 +634,8 @@ def run_game(path, jump_beats, dur, time_offset, song_title, song_artist, cover_
 def main():
     pygame.init()
 
-    # Ensure Spotify credentials are set up and stored
     ensure_spotify_credentials()
+    ensure_ffmpeg_path()
 
     while True:
         track = live_search_screen()
@@ -636,7 +647,6 @@ def main():
 
         show_loading_screen("Loading song...")
 
-        # Always use YouTube for audio based on Spotify track name + artists
         name = track["name"] + " " + " ".join(a["name"] for a in track["artists"])
         print("\nUsing YouTube audio for:", name)
         audio = download_youtube_audio(name)
