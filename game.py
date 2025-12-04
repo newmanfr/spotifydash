@@ -16,7 +16,7 @@ from pytubefix import Search
 # CONFIG
 # ============================================================
 
-FFMPEG_EXE = r"C:\Users\Olive\Desktop\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe"
+FFMPEG_EXE = r"ENTER PATH HERE"
 
 # These will be filled at runtime from saved credentials / user input
 SPOTIFY_CLIENT_ID = None
