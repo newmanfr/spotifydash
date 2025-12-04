@@ -8,7 +8,7 @@ FFMPEG
 This game requires FFmpeg to convert audio.  
 Download FFmpeg here: https://ffmpeg.org/download.html
 
-After installing, set the FFMPEG_EXE path in `game.py` to wherever FFmpeg is located, e.g.:
+After installing, set the FFMPEG_EXE path when asked loading the script!
 
 FFMPEG_EXE = r"C:\ffmpeg\bin\ffmpeg.exe"
 
@@ -25,3 +25,5 @@ SPOTIFY API
 5. Done!
 
 I cannot see any of these. It is important you do not share these with anyone.
+
+If you have any questions feel free to ask in my server, https://dsc.gg/vrtl
